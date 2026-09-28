@@ -1,0 +1,34 @@
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: ./backend
+    container_name: evosearch-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - evosearch_data:/app/data
+    environment:
+      - DATABASE_URL=sqlite:////app/data/evosearch.db
+      - STORAGE_PATH=/app/data/uploads
+      - VECTOR_INDEX_PATH=/app/data/vector_index
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - LLM_MODEL=${LLM_MODEL:-claude-sonnet-4-6}
+      - SECRET_KEY=${SECRET_KEY:-dev-secret-change-me}
+      - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-25}
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: evosearch-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  evosearch_data:
