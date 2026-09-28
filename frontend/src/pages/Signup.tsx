@@ -3,6 +3,8 @@ import { useNavigate, Link } from 'react-router-dom'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { useAuth } from '../contexts/AuthContext'
 
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+
 export default function SignupPage() {
   const navigate = useNavigate()
   const { login } = useAuth()
@@ -16,7 +18,7 @@ export default function SignupPage() {
   const requirementsQuery = useQuery({
     queryKey: ['password-requirements'],
     queryFn: async () => {
-      const res = await fetch('/api/auth/password-requirements')
+      const res = await fetch(`${API_URL}/api/auth/password-requirements`)
       return res.json()
     },
   })
@@ -50,7 +52,7 @@ export default function SignupPage() {
   const signupMutation = useMutation({
     mutationFn: async () => {
       const normalizedEmail = email.toLowerCase().trim()
-      const res = await fetch('/api/auth/signup', {
+      const res = await fetch(`${API_URL}/api/auth/signup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: normalizedEmail, password }),

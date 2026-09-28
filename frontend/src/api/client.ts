@@ -5,7 +5,9 @@ import type {
   ImpactResult, HealthStatus, CodeComparisonResult,
 } from '../types'
 
-const api = axios.create({ baseURL: '/api' })
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+
+const api = axios.create({ baseURL: `${API_URL}/api` })
 
 // Add authorization token to all requests
 api.interceptors.request.use((config) => {
