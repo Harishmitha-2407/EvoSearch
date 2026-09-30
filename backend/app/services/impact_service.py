@@ -10,9 +10,12 @@ from sqlalchemy.orm import Session
 from app import models
 
 
-def find_potential_impact(db: Session, group: str, entity_name: str, exclude_file_id: str | None = None):
+def find_potential_impact(db: Session, group: str, entity_name: str, exclude_file_id: str | None = None, user_id: str | None = None):
     pattern = re.compile(r"\b" + re.escape(entity_name) + r"\b")
-    files = db.query(models.CodeFile).filter(models.CodeFile.group == group).all()
+    q = db.query(models.CodeFile).filter(models.CodeFile.group == group)
+    if user_id:
+        q = q.filter(models.CodeFile.user_id == user_id)
+    files = q.all()
 
     referencing = []
     for f in files:

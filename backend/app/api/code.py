@@ -384,5 +384,5 @@ def get_impact(
     ).first()
     if not f:
         raise HTTPException(404, "Code file not found")
-    referencing, note = find_potential_impact(db, f.group, entity_name, exclude_file_id=file_id)
+    referencing, note = find_potential_impact(db, f.group, entity_name, exclude_file_id=file_id, user_id=user.id)
     return ImpactOut(entity_name=entity_name, referencing_files=referencing, note=note)

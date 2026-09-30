@@ -55,6 +55,7 @@ export default function CodeAnalysisPage() {
     queryKey: ['impact', selectedEntity?.fileId, selectedEntity?.name],
     queryFn: () => Code.impact(selectedEntity!.fileId, selectedEntity!.name),
     enabled: !!selectedEntity,
+    staleTime: 0,
   })
 
   return (

@@ -6,24 +6,66 @@ from app.dependencies import get_db, get_current_user
 from app import models
 from app.schemas import ChatRequest, ChatResponse, ChatSourceOut
 from app.services.retrieval_service import semantic_search
-from app.services import llm_service
+from app.services import llm_service, vector_service
+from app.services.embedding_service import embed_query
+from app.config import settings
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 INSUFFICIENT_EVIDENCE_MSG = "I couldn't find sufficient evidence in the uploaded material to answer that."
 
 SYSTEM_PROMPT = (
-    "You are EVOSearch's document assistant. Answer the user's question using "
-    "ONLY the provided evidence excerpts. Each excerpt is labeled with a "
-    "source number. Rules:\n"
-    "1. Never invent facts, dates, page numbers, or sources not in the evidence.\n"
-    "2. If the evidence is insufficient or doesn't address the question, say so plainly.\n"
-    "3. Clearly distinguish evidence from your own interpretation.\n"
-    "4. Reference sources inline like [1], [2] matching the excerpt numbers.\n"
-    "5. Be concise by default; expand only if the question asks for detail.\n"
-    "Return ONLY JSON with keys: answer (string), confidence (0.0-1.0 float), "
-    "used_sources (array of integers referencing the excerpt numbers actually used)."
+    "You are EVOSearch's document and code assistant. Answer the user's question using "
+    "ONLY the provided evidence excerpts. Each excerpt is labeled with a source number.\n\n"
+    "CRITICAL RULES:\n"
+    "1. ONLY use evidence provided - never invent facts, dates, or sources.\n"
+    "2. If evidence is insufficient to answer the question, respond: 'I couldn't find sufficient evidence in the uploaded material to answer that.'\n"
+    "3. For conceptual questions (e.g., 'what is X?'), provide a clear explanation based on evidence.\n"
+    "4. For code questions (e.g., 'explain code line by line'), provide detailed line-by-line breakdown.\n"
+    "5. For questions asking 'what is X?', look for docstrings, comments, or contextual clues about what X does.\n"
+    "6. Reference sources inline like [1], [2] matching the excerpt numbers.\n"
+    "7. Be concise by default; expand only if the question asks for detail.\n\n"
+    "Return ONLY valid JSON with keys: answer (string), confidence (0.0-1.0 float), "
+    "used_sources (array of integers referencing the excerpt numbers actually used in your answer)."
 )
+
+
+def search_code_entities(db: Session, query: str, user_id: str, top_k: int = 6, code_file_id: str = None):
+    """Search code entities using semantic search and metadata filters."""
+    query_vec = embed_query(query)
+    raw_hits = vector_service.search("code_entities", query_vec, top_k=max(top_k * 6, 40))
+    
+    results = []
+    for vector_ref, score in raw_hits:
+        if score < settings.SEARCH_SIMILARITY_THRESHOLD:
+            continue
+        entity = db.query(models.CodeEntity).filter(models.CodeEntity.vector_ref == vector_ref).first()
+        if not entity:
+            continue
+        code_file = db.query(models.CodeFile).filter(models.CodeFile.id == entity.code_file_id).first()
+        if not code_file or code_file.user_id != user_id:
+            continue
+        if code_file_id and code_file.id != code_file_id:
+            continue
+        
+        # Prioritize source_snippet (full code), then signature, then name
+        code_text = entity.source_snippet or entity.signature or f"{entity.entity_type}: {entity.name}"
+        
+        results.append({
+            "chunk_id": entity.id,
+            "document_id": code_file.id,
+            "document_filename": code_file.filename,
+            "text": code_text,
+            "similarity": round(score, 4),
+            "page": None,
+            "section": entity.name,
+            "group": code_file.group,
+            "year": None,
+        })
+        if len(results) >= top_k:
+            break
+    
+    return results
 
 
 @router.post("", response_model=ChatResponse)
@@ -62,8 +104,15 @@ def chat(req: ChatRequest, db: Session = Depends(get_db), user: models.User = De
         filters["user_id"] = user.id
 
         hits = semantic_search(db, req.question, top_k=6, filters=filters)
+        
+        # Always search code entities - they can provide context/examples too
+        code_hits = search_code_entities(db, req.question, user.id, top_k=6, code_file_id=req.document_id)
+        
+        # Combine and rank by similarity
+        all_hits = hits + code_hits
+        all_hits = sorted(all_hits, key=lambda x: x['similarity'], reverse=True)[:6]
 
-        if not hits:
+        if not all_hits:
             db.add(models.ChatMessage(
                 session_id=session.id,
                 role="assistant",
@@ -82,12 +131,12 @@ def chat(req: ChatRequest, db: Session = Depends(get_db), user: models.User = De
 
         excerpt_block = "\n\n".join(
             f"[{i+1}] (document: {h['document_filename']}, page: {h['page']})\n{h['text']}"
-            for i, h in enumerate(hits)
+            for i, h in enumerate(all_hits)
         )
 
         answer_text = None
         confidence = 0.5
-        used_indices = list(range(len(hits)))
+        used_indices = list(range(len(all_hits)))
 
         if llm_service.is_available():
             result = llm_service.call_structured(
@@ -100,27 +149,37 @@ def chat(req: ChatRequest, db: Session = Depends(get_db), user: models.User = De
                 confidence = float(result.get("confidence", 0.6))
                 used = result.get("used_sources")
                 if isinstance(used, list) and used:
-                    used_indices = [i - 1 for i in used if isinstance(i, int) and 1 <= i <= len(hits)]
+                    used_indices = [i - 1 for i in used if isinstance(i, int) and 1 <= i <= len(all_hits)]
 
         if answer_text is None:
-            top = hits[0]
+            top = all_hits[0]
             page_suffix = f", page {top['page']}" if top['page'] else ""
-            answer_text = (
-                f"Based on the most relevant excerpt (from '{top['document_filename']}'"
-                f"{page_suffix}): {top['text'][:500]}"
-            )
+            section_suffix = f" ({top['section']})" if top['section'] else ""
+            
+            # Create a better fallback based on question type
+            if "what is" in req.question.lower() or "explain" in req.question.lower():
+                answer_text = (
+                    f"Based on the code from '{top['document_filename']}'{section_suffix}{page_suffix}:\n\n"
+                    f"{top['text']}\n\n"
+                    f"This shows the implementation of {top['section']}."
+                )
+            else:
+                answer_text = (
+                    f"Based on the most relevant excerpt from '{top['document_filename']}'"
+                    f"{section_suffix}{page_suffix}:\n{top['text'][:500]}"
+                )
             confidence = round(min(0.6, top["similarity"]), 3)
             used_indices = [0]
 
         sources = [
             ChatSourceOut(
-                document_id=hits[i]["document_id"],
-                document_filename=hits[i]["document_filename"],
-                chunk_id=hits[i]["chunk_id"],
-                page=hits[i]["page"],
-                similarity=hits[i]["similarity"],
+                document_id=all_hits[i]["document_id"],
+                document_filename=all_hits[i]["document_filename"],
+                chunk_id=all_hits[i]["chunk_id"],
+                page=all_hits[i]["page"],
+                similarity=all_hits[i]["similarity"],
             )
-            for i in used_indices if 0 <= i < len(hits)
+            for i in used_indices if 0 <= i < len(all_hits)
         ]
 
         db.add(models.ChatMessage(
